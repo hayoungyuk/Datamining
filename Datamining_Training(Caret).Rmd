@@ -1,0 +1,367 @@
+---
+title: "Datamining with R (caret)"
+author: "Yuk Ha Young"
+date: "2023-04-26"
+output: html_document
+---
+
+```{r}
+#다음 용어를 chatGPT로 요약하시오
+#
+#-1 과적합 (Overfitting) : 
+#학습 데이터에 지나치게 적합한 모델을 만들어 
+#일반화 능력을 상실하는 문제를 의미합니다. 
+#이러한 모델은 새로운 데이터를 예측할 때 
+#예측력이 떨어지는 문제가 발생합니다.
+#
+#-2 편의-분산 충돌 (Bias-Variance Tradeoff) : 
+#모델이 학습 데이터에 대해 편향(Bias)되어있으면 
+#일반화 능력이 부족하게 되는데, 이것을 편의(Bias)라고 합니다. 
+#반대로, 모델이 학습 데이터에 과적합(Overfitting)되면 
+#분산(Variance)이 높아져 일반화 능력이 부족하게 됩니다.
+#
+#-3 AIC(Akaike Information Criterion) : 
+#모델의 복잡성을 고려하여 모델의 적합도를 평가하는 지표입니다. 
+#AIC는 모델의 로그 우도 함수와 페널티 항을 합한 값을 
+#최소화하는 모델을 선택합니다. 
+#AIC가 낮은 모델이 더 적합한 모델로 간주됩니다.
+#
+#-4 규제화 (Regularization) : 
+#모델이 과적합(Overfitting) 되는 것을 방지하기 위해 
+#모델의 복잡성을 제한하는 기법입니다. L1, L2 등의 규제화 방법이 있으며, 
+#모델 학습 과정에서 penalty를 추가하여 일부 계수의 크기를 제한하거나, 
+#모델 파라미터의 크기를 제한하여 모델의 일반화 능력을 향상시킵니다.
+```
+
+
+# REG-df2015na-Part1-v1
+
+## 실행시간 측정
+```{r}
+time1 <- Sys.time()
+```
+
+## 패키지
+```{r}
+library(caret)
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(naniar)
+library(gridExtra)
+library(ggpubr)
+library(scales)
+```
+
+## 파일읽기
+```{r}
+DF<-read_csv("D:/Datamining20210848/df2015na.csv")
+dim(DF)
+str(DF)
+head(DF)
+```
+
+## 변수조정
+```{r}
+DF <-
+    DF %>%
+    mutate(gnd=factor(gnd), bld=factor(bld),
+           lft=factor(lft, labels=c('N','Y')),
+           smk=factor(smk, labels=c('N','Y')),
+           alc=factor(alc, labels=c('N','Y')))
+str(DF)
+```
+
+## 결측
+```{r}
+DF %>% skim()
+
+DF %>% group_by(gnd) %>% skim()
+
+sum(complete.cases(DF)) / nrow(DF) * 100
+
+naniar::vis_miss(DF)
+naniar::miss_var_summary(DF)
+```
+
+## 간단탐색
+```{r}
+featurePlot(x=DF %>% select_if(is.numeric), y=DF$gnd,
+            plot='box',
+            scales=list(x=list(relation='free'), y=list(relation='free')))
+
+featurePlot(x=DF %>% select_if(is.numeric), y=DF$bld,
+            plot='box',
+            scales=list(x=list(relation='free'), y=list(relation='free')))
+
+
+featurePlot(x=DF %>% select_if(is.numeric), y=DF$lft,
+            plot='box',
+            scales=list(x=list(relation='free'), y=list(relation='free')))
+
+
+featurePlot(x=DF %>% select_if(is.numeric), y=DF$smk,
+            plot='box',
+            scales=list(x=list(relation='free'), y=list(relation='free')))
+
+
+featurePlot(x=DF %>% select_if(is.numeric), y=DF$alc,
+            plot='box',
+            scales=list(x=list(relation='free'), y=list(relation='free')))
+```
+
+## 연속 ~ 연속
+```{r}
+R <- cor(DF %>% select_if(is.numeric) , use='pairwise.complete.obs')
+round(R,4)
+
+sort(R['ht',], decreasing = TRUE)
+
+corrplot::corrplot.mixed(R, upper='ellipse', order='FPC')
+
+library(GGally)
+
+DF %>% select_if(is.numeric) %>%
+  ggcorr(geom='tile', label=TRUE)
+
+DF %>%
+  ggpairs(columns=c('ht', 'ftln', 'hdln', 'ftwd', 'hdwd', 'wt'),
+          lower=list(continuous=wrap('points', alpha=0.05, col='blue')),
+          diag=list(continuous='barDiag'))
+
+DF %>%
+  ggplot(aes(x=wt, y=ht))+
+  geom_density2d()+
+  geom_point(aes(col=gnd, shape=gnd))
+```
+
+## 분할/예측값 저장소 준비
+```{r}
+set.seed(1111)
+ls <- initial_split(DF, prop=0.75)
+TR <- training(ls)
+TS <- testing(ls)
+
+TROUT <- TR %>% dplyr::select(ht)
+TSOUT <- TS %>% dplyr::select(ht)
+```
+
+## 전처리
+```{r}
+RC <-
+  recipe(ht~. , data=TR) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_impute_mode(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+RC
+```
+
+## 튜닝 계획 지정
+```{r}
+trCtrl <- trainControl(method='cv',number=5)
+```
+
+## lm : 선형회귀모형
+```{r}
+modelLookup('lm')
+
+set.seed(100)
+Mlm <-
+  train(RC, data=TR,
+        method='lm',
+        trControl=trCtrl)
+Mlm
+
+Mlm$results
+
+summary(Mlm)
+
+Mlm$bestTune
+
+Mlm$finalModel
+
+Mlm$resample
+```
+```{r}
+TROUT <- TR %>% dplyr::select(ht)
+TSOUT <- TS %>% dplyr::select(ht)
+TROUT <- TROUT %>% bind_cols(yhlm=predict(Mlm, newdata=TR))
+TSOUT <- TSOUT %>% bind_cols(yhlm=predict(Mlm, newdata=TS))
+head(TSOUT)
+```
+```{r}
+metreg <- function(y, yh){
+  c(rmse=rmse_vec(y, yh),
+    mae=mae_vec(y, yh),
+    rsq=rsq_vec(y, yh))
+}
+metreg(TSOUT$ht, TSOUT$yhlm)
+```
+```{r}
+METlm <-
+  metreg(TROUT$ht, TROUT$yhlm) %>%
+  bind_rows(metreg(TSOUT$ht, TSOUT$yhlm)) %>%
+  bind_cols(data.frame(model=c('lm','lm'), TRTS=c('TR','TS')))
+METlm
+```
+```{r}
+g1<-
+  TROUT %>%
+  ggplot(aes(x=yhlm, y=ht)) + geom_point() +
+  geom_abline(intercept=0, slope=1) + coord_obs_pred()
+g2<-
+  TROUT %>%
+  ggplot(aes(x=yhlm, y=ht-yhlm)) + geom_point() +
+  geom_hline(yintercept=0)
+g3<-
+  TSOUT %>%
+  ggplot(aes(x=yhlm, y=ht)) + geom_point() +
+  geom_abline(intercept=0, slope=1) + coord_obs_pred()
+g4<-
+  TSOUT %>%
+  ggplot(aes(x=yhlm, y=ht-yhlm)) + geom_point() +
+  geom_hline(yintercept=0)
+grid.arrange(g1,g2,g3,g4, ncol=2)
+```
+
+## lmStepAIC: AIC변수선택
+```{r}
+modelLookup('lmStepAIC')
+
+set.seed(100)
+Mstep<-
+  train(RC, data=TR,
+        method='lmStepAIC',
+        direction='backward',
+        trControl = trCtrl)
+
+Mstep
+
+Mstep$results
+
+summary(Mstep)
+
+Mstep$bestTune
+Mstep$finalModel
+Mstep$finalModel
+Mstep$resample
+```
+```{r}
+TROUT <- TROUT %>% mutate(yhstep=predict(Mstep, newdata=TR))
+TSOUT <- TSOUT %>% mutate(yhstep=predict(Mstep, newdata=TS))
+head(TSOUT)
+```
+```{r}
+g1 <-
+  TROUT %>%
+  ggplot(aes(x=yhstep, y=ht)) + geom_point() +
+  geom_abline(intercept=0, slope=1) + coord_obs_pred()
+g2 <-
+  TROUT %>%
+  ggplot(aes(x=yhstep, y=ht-yhstep)) + geom_point() +
+  geom_hline(yintercept=0)
+g3 <-
+  TSOUT %>%
+  ggplot(aes(x=yhstep, y=ht)) + geom_point() +
+  geom_abline(intercept=0, slope=1) + coord_obs_pred()
+g4 <-
+  TSOUT %>%
+  ggplot(aes(x=yhstep, y=ht-yhstep)) + geom_point() +
+  geom_hline(yintercept=0)
+grid.arrange(g1,g2,g3,g4, ncol=2)
+```
+```{r}
+METstep <-
+  metreg(TROUT$ht, TROUT$yhstep) %>%
+  bind_rows(metreg(TSOUT$ht, TSOUT$yhstep)) %>%
+  bind_cols(data.frame(model=c('lmStepAIC', 'lmStepAIC'), TRTS=c('TR','TS')))
+METstep
+```
+
+## glmnet, elasticnet, lasso, ridge
+```{r}
+modelLookup('enet')
+
+modelLookup('glmnet')
+
+set.seed(100)
+glmnetGrid <- expand.grid(alpha=seq(0,1,by=0.25), lambda=seq(0.0, 0.1, by=0.01))
+trCtrl <- trainControl(method='cv', number=5)
+Mglmnet <-
+  train(RC, data=TR,
+        method='glmnet',
+        trControl=trCtrl,
+        tuneGrid=glmnetGrid)
+Mglmnet
+
+Mglmnet$results
+
+ggplot(Mglmnet)
+
+Mglmnet$bestTune
+
+Mglmnet$resample
+
+plot(Mglmnet$finalModel)
+
+plot(Mglmnet$finalModel, xvar='lambda', label=TRUE)
+abline(v=log(Mglmnet$bestTune$lambda), lty=2)
+
+coef(Mglmnet$final, s=Mglmnet$bestTune$lambda)
+```
+```{r}
+TROUT <- TROUT %>% mutate(yhglmnet=predict(Mglmnet, newdata=TR))
+TSOUT <- TSOUT %>% mutate(yhglmnet=predict(Mglmnet, newdata=TS))
+```
+```{r}
+g1 <- TROUT %>%
+  ggplot(aes(x=yhglmnet, y=ht)) + geom_point()+
+  geom_abline(intercept=0, slope=1) + coord_obs_pred()
+g2 <- TROUT %>%
+  ggplot(aes(x=yhglmnet, y=ht-yhglmnet)) + geom_point()+
+  geom_hline(yintercept=0)
+g3 <- TSOUT %>%
+  ggplot(aes(x=yhglmnet, y=ht)) + geom_point()+
+  geom_abline(intercept=0, slope=1) + coord_obs_pred()
+g4 <- TSOUT %>%
+  ggplot(aes(x=yhglmnet, y=ht-yhglmnet)) + geom_point()+
+  geom_hline(yintercept=0)
+grid.arrange(g1,g2,g3,g4, ncol=2)
+```
+```{r}
+METglmnet <-
+  metreg(TROUT$ht, TROUT$yhglmnet) %>%
+  bind_rows(metreg(TSOUT$ht, TSOUT$yhglmnet)) %>%
+  bind_cols(data.frame(model=c('glmnet', 'glmnet'), TRTS=c('TR', 'TS')))
+METglmnet
+```
+
+## 평가
+```{r}
+RESAMP <- resamples(list(LM=Mlm, STEP=Mstep, GLMNET=Mglmnet))
+summary(RESAMP)
+
+bwplot(RESAMP)
+```
+
+## TR, TS 평가
+```{r}
+MET <-
+  bind_rows(METlm, METstep, METglmnet) %>%
+  arrange(rmse)
+MET
+```
+```{r}
+g1 <- MET %>% ggplot(aes(x=model, y=rsq, shape=TRTS, col=TRTS, group=TRTS)) +
+  geom_line() + geom_point(size=3)
+g2 <- MET %>% ggplot(aes(x=model, y=rmse, shape=TRTS, col=TRTS, group=TRTS)) +
+  geom_line() + geom_point(size=3)
+grid.arrange(g1,g2,nrow=2,ncol=1)
+```
+
+## 실행시간
+```{r}
+time2 <- Sys.time()
+time1 <- Sys.time()
+time2-time1
+```
